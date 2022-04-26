@@ -69,11 +69,31 @@ use crate::{
 };
 use crate::{git::GitConfig, template_variables::resolve_template_values};
 
+/// # Panics
 pub fn generate(mut args: Args) -> Result<()> {
-    let app_config = AppConfig::from_path(&app_config_path(&args.config)?)?;
+    let app_config: AppConfig = app_config_path(&args.config)?.as_path().try_into()?;
 
     if args.list_favorites {
         return list_favorites(&app_config, &args);
+    }
+
+    if args.ssh_identity.is_none()
+        && app_config.defaults.is_some()
+        && app_config.defaults.as_ref().unwrap().ssh_identity.is_some()
+    {
+        args.ssh_identity = app_config
+            .defaults
+            .as_ref()
+            .unwrap()
+            .ssh_identity
+            .as_ref()
+            .cloned();
+        if let Some(id) = args.ssh_identity.as_ref() {
+            info!(
+                "Using ssh-identity from application config: {}",
+                style(id.as_path().display()).bold()
+            )
+        }
     }
 
     let default_values = resolve_favorite_args_and_default_values(&app_config, &mut args)?;
@@ -204,7 +224,17 @@ fn resolve_template_dir(template_base_dir: &TempDir, args: &Args) -> Result<Path
     match &args.subfolder {
         Some(subfolder) => {
             let template_base_dir = fs::canonicalize(template_base_dir.path())?;
-            let template_dir = fs::canonicalize(template_base_dir.join(subfolder))?;
+            let template_dir =
+                fs::canonicalize(template_base_dir.join(subfolder)).with_context(|| {
+                    format!(
+                        "not able to find subfolder '{}' in repository {}",
+                        subfolder,
+                        args.git
+                            .as_ref()
+                            .map(|v| v.to_owned())
+                            .unwrap_or_else(|| args.path.as_ref().unwrap().display().to_string()),
+                    )
+                })?;
 
             if !template_dir.starts_with(&template_base_dir) {
                 return Err(anyhow!(
@@ -349,15 +379,11 @@ pub(crate) fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Resu
     copy_all(src, dst)
 }
 
-fn locate_template_file<T1, T2>(
+fn locate_template_file(
     name: &str,
-    template_base_folder: T1,
-    template_folder: T2,
-) -> Result<PathBuf>
-where
-    T1: AsRef<Path>,
-    T2: AsRef<Path>,
-{
+    template_base_folder: impl AsRef<Path>,
+    template_folder: impl AsRef<Path>,
+) -> Result<PathBuf> {
     let template_base_folder = template_base_folder.as_ref();
     let mut search_folder = template_folder.as_ref().to_path_buf();
     loop {
